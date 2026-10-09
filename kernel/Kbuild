@@ -91,13 +91,17 @@ ifneq ($(KBUILD_EXTMOD),)
 # 6.18 exports the external module source as srcroot when M/MO are used.
 ifneq ($(srcroot),)
 KSU_KERNEL_DIR := $(srcroot)
+ccflags-y += -I$(KSU_KERNEL_DIR)/compat
 else
 KSU_KERNEL_DIR := $(KBUILD_EXTMOD)
+ccflags-y += -I$(KSU_KERNEL_DIR)/compat
 endif
 else ifeq ($(filter /%,$(src)),)
 KSU_KERNEL_DIR := $(srctree)/$(src)
+ccflags-y += -I$(KSU_KERNEL_DIR)/compat
 else
 KSU_KERNEL_DIR := $(src)
+ccflags-y += -I$(KSU_KERNEL_DIR)/compat
 endif
 
 ccflags-y += -I$(KSU_KERNEL_DIR) -I$(KSU_KERNEL_DIR)/include

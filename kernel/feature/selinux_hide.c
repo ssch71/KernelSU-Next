@@ -1,3 +1,5 @@
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
 #include "selinux_hide.h"
 #include "infra/symbol_resolver.h"
 #include "linux/jump_label.h"
@@ -1184,4 +1186,25 @@ allow:
     avd->allowed = 0xffffffff;
     goto out;
 }
+#endif
+
+#else /* 4.19: SELinux policy-swap hiding is not supported */
+#include "avc.h"
+#include "security.h"
+struct selinux_state fake_state = {0};
+#include <linux/types.h>
+#include <linux/jump_label.h>
+#include "feature/selinux_hide.h"
+
+bool ksu_selinux_hide_running = false;
+bool ksu_selinux_hide_enabled = false;
+struct page *fake_status = NULL;
+DEFINE_STATIC_KEY_FALSE(fake_status_initialize_key);
+
+void initialize_fake_status(void) {}
+void ksu_selinux_hide_init(void) {}
+void ksu_selinux_hide_exit(void) {}
+void ksu_selinux_hide_drop_backup_if_unused(void) {}
+void ksu_selinux_hide_handle_second_stage(void) {}
+void ksu_selinux_hide_handle_post_fs_data(void) {}
 #endif

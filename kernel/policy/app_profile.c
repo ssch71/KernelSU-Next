@@ -104,9 +104,13 @@ void disable_seccomp(void)
 
     memcpy(fake, current, sizeof(*fake));
 
+#ifdef CONFIG_SECCOMP
     current->seccomp.mode = 0;
     current->seccomp.filter = NULL;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
     atomic_set(&current->seccomp.filter_count, 0);
+#endif
+#endif
     spin_unlock_irq(&current->sighand->siglock);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
@@ -123,7 +127,9 @@ void disable_seccomp(void)
     fake->sighand = NULL;
 #endif
 
+#ifdef CONFIG_SECCOMP
     seccomp_filter_release(fake);
+#endif
     kfree(fake);
 }
 

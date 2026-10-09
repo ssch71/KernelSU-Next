@@ -128,7 +128,11 @@ void disable_seccomp(void)
 #endif
 
 #ifdef CONFIG_SECCOMP
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
     seccomp_filter_release(fake);
+#else
+    put_seccomp_filter(fake);
+#endif
 #endif
     kfree(fake);
 }

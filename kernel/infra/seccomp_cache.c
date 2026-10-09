@@ -1,4 +1,6 @@
 #include <linux/version.h>
+#if defined(CONFIG_SECCOMP) && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+#include <linux/version.h>
 #include <linux/fs.h>
 #include <linux/nsproxy.h>
 #include <linux/sched/task.h>
@@ -63,3 +65,9 @@ void ksu_seccomp_allow_cache(struct seccomp_filter *filter, int nr)
     }
 #endif
 }
+#else
+struct seccomp_filter;
+#include "infra/seccomp_cache.h"
+void ksu_seccomp_clear_cache(struct seccomp_filter *filter, int nr) {}
+void ksu_seccomp_allow_cache(struct seccomp_filter *filter, int nr) {}
+#endif

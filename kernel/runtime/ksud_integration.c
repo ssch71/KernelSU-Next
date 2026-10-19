@@ -29,6 +29,7 @@
 #include "selinux/selinux.h"
 #include "hook/syscall_hook.h"
 #include "hook/syscall_event_bridge.h"
+#include "preinit/preinit.h"
 
 #include "linux/jump_label.h"
 
@@ -179,6 +180,7 @@ int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
             char buf[16];
             if (check_argv(*argv, 1, "second_stage", buf, sizeof(buf))) {
                 pr_info("/system/bin/init second_stage executed\n");
+                ksu_preinit_release();
                 ksu_selinux_hide_handle_second_stage();
                 apply_kernelsu_rules();
                 cache_sid();
@@ -195,6 +197,7 @@ int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
             char buf[16];
             if (check_argv(*argv, 1, "-Xzygote", buf, sizeof(buf))) {
                 pr_info("exec zygote, /data prepared, second_stage: %d\n", !static_key_enabled(&is_init_second_stage_not_executed));
+                ksu_preinit_release();
                 on_post_fs_data();
                 cache_sid();
                 setup_ksu_cred();
@@ -219,6 +222,7 @@ void ksu_handle_execveat_ksud(const char *path, struct user_arg_ptr *argv)
             char buf[16];
             if (check_argv(*argv, 1, "second_stage", buf, sizeof(buf))) {
                 pr_info("/system/bin/init second_stage executed\n");
+                ksu_preinit_release();
                 ksu_selinux_hide_handle_second_stage();
                 apply_kernelsu_rules();
                 cache_sid();
@@ -235,6 +239,7 @@ void ksu_handle_execveat_ksud(const char *path, struct user_arg_ptr *argv)
             char buf[16];
             if (check_argv(*argv, 1, "-Xzygote", buf, sizeof(buf))) {
                 pr_info("exec zygote, /data prepared, second_stage: %d\n", !static_key_enabled(&is_init_second_stage_not_executed));
+                ksu_preinit_release();
                 on_post_fs_data();
                 static_branch_disable(&is_first_zygote);
                 ksu_stop_ksud_execve_hook();
@@ -250,7 +255,8 @@ static struct file_operations fops_proxy;
 static ssize_t ksu_rc_pos = 0;
 const size_t ksu_rc_len = sizeof(KERNEL_SU_RC) - 1;
 
-// Prefer /metadata/watchdog/ when present, else /metadata.
+// Prefer /metadata/vold, else /metadata/watchdog, else /metadata.
+#define MODULE_RC_PATH_VOLD "/metadata/vold/ksu/modules.rc"
 #define MODULE_RC_PATH_WATCHDOG "/metadata/watchdog/ksu/modules.rc"
 #define MODULE_RC_PATH_DEFAULT "/metadata/ksu/modules.rc"
 static char *module_rc_buf;
@@ -259,7 +265,12 @@ static ssize_t module_rc_pos;
 
 static struct file *open_module_rc(const char **chosen_path)
 {
-    struct file *f = filp_open(MODULE_RC_PATH_WATCHDOG, O_RDONLY, 0);
+    struct file *f = filp_open(MODULE_RC_PATH_VOLD, O_RDONLY, 0);
+    if (!IS_ERR(f)) {
+        *chosen_path = MODULE_RC_PATH_VOLD;
+        return f;
+    }
+    f = filp_open(MODULE_RC_PATH_WATCHDOG, O_RDONLY, 0);
     if (!IS_ERR(f)) {
         *chosen_path = MODULE_RC_PATH_WATCHDOG;
         return f;

@@ -14,6 +14,7 @@ import android.system.Os
 import android.util.Log
 import com.rifsxd.ksunext.BuildConfig
 import com.rifsxd.ksunext.Natives
+import com.rifsxd.ksunext.R
 import com.rifsxd.ksunext.ksuApp
 import com.topjohnwu.superuser.CallbackList
 import com.topjohnwu.superuser.Shell
@@ -26,6 +27,7 @@ import org.json.JSONArray
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.zip.ZipFile
 
 /**
  * @author weishu
@@ -270,10 +272,29 @@ fun flashModule(
         val result = flashWithIO("${getKsuDaemonPath()} $cmd", onStdout, onStderr)
         Log.i("KernelSU", "install module $uri result: $result")
 
+        val showReboot = result.isSuccess && moduleNeedsReboot(file)
         file.delete()
 
-        return FlashResult(result)
+        return FlashResult(result, showReboot)
     }
+}
+
+private val MODULE_ID_REGEX = Regex("^[a-zA-Z][a-zA-Z0-9._-]+$")
+
+// A hot installed module goes live without leaving the "update" flag behind
+private fun moduleNeedsReboot(zip: File): Boolean {
+    val id = runCatching {
+        ZipFile(zip).use { archive ->
+            val entry = archive.getEntry("module.prop") ?: return@use null
+            archive.getInputStream(entry).bufferedReader().useLines { lines ->
+                lines.map { it.trim() }.firstOrNull { it.startsWith("id=") }?.substringAfter('=')?.trim()
+            }
+        }
+    }.getOrNull()
+    if (id == null || !MODULE_ID_REGEX.matches(id)) return true
+    val dir = "/data/adb/modules/$id"
+    // Any failure to check counts as needing a reboot
+    return !ShellUtils.fastCmdResult("[ -d $dir ] && [ ! -e $dir/update ]")
 }
 
 fun runModuleAction(
@@ -496,6 +517,49 @@ suspend fun getSupportedKmis(): List<String> = withContext(Dispatchers.IO) {
     out.filter { it.isNotBlank() }.map { it.trim() }
 }
 
+fun loadSusfsGuardLkm(kmi: String? = null): Boolean {
+    val args = buildString {
+        append("susfs load")
+        if (kmi != null) {
+            require(kmi.matches(Regex("[A-Za-z0-9._-]+"))) { "Invalid KMI: $kmi" }
+            append(" --kmi ")
+            append(kmi)
+        }
+    }
+    return execKsud(args, newShell = true, globalMnt = true)
+}
+
+fun unloadSusfsGuardLkm(): Boolean =
+    execKsud("susfs unload", newShell = true, globalMnt = true)
+
+suspend fun isSusfsGuardLkmLoaded(): Boolean = withContext(Dispatchers.IO) {
+    createRootShell(true).newJob()
+        .add("test -d /sys/module/susfs_guard_lkm")
+        .exec()
+        .isSuccess
+}
+
+suspend fun getSusfsAutoLoadEnabled(): Boolean = withContext(Dispatchers.IO) {
+    val shell = createRootShell(true)
+    val result = shell.newJob()
+        .add("${getKsuDaemonPath()} susfs autoload status")
+        .to(ArrayList<String>(), null)
+        .exec()
+    result.isSuccess && result.out.any { it.trim() == "enabled" }
+}
+
+fun setSusfsAutoLoadEnabled(enabled: Boolean, fallbackKmi: String? = null): Boolean {
+    val args = if (enabled) {
+        require(fallbackKmi != null && fallbackKmi.matches(Regex("[A-Za-z0-9._-]+"))) {
+            "A valid KMI is required to enable SUSFS auto-load"
+        }
+        "susfs autoload enable --kmi $fallbackKmi"
+    } else {
+        "susfs autoload disable"
+    }
+    return execKsud(args, newShell = true, globalMnt = true)
+}
+
 suspend fun isAbDevice(): Boolean = withContext(Dispatchers.IO) {
     val cmd = "boot-info is-ab-device"
     ShellUtils.fastCmd("${getKsuDaemonPath()} $cmd").trim().toBoolean()
@@ -568,7 +632,7 @@ fun getAppProfileTemplate(id: String): String {
 }
 
 fun getFileName(context: Context, uri: Uri): String {
-    var name = "Unknown Module"
+    var name = context.getString(R.string.module_unknown)
     if (uri.scheme == ContentResolver.SCHEME_CONTENT) {
         val cursor: Cursor? = context.contentResolver.query(uri, null, null, null, null)
         cursor?.use {
@@ -577,7 +641,7 @@ fun getFileName(context: Context, uri: Uri): String {
             }
         }
     } else if (uri.scheme == "file") {
-        name = uri.lastPathSegment ?: "Unknown Module"
+        name = uri.lastPathSegment ?: context.getString(R.string.module_unknown)
     }
     return name
 }
@@ -695,4 +759,12 @@ fun setRisk(enabled: Boolean): Boolean {
             "${getKsuDaemonPath()} module risk $command"
         )
     }.getOrDefault(false)
+}
+
+fun nonRootShell(command: String): Boolean {
+    val process = ProcessBuilder("sh", "-c", command)
+        .redirectErrorStream(true)
+        .start()
+    process.inputStream.bufferedReader().readText()
+    return process.waitFor() == 0
 }

@@ -11,6 +11,11 @@
 #include "klog.h" // IWYU pragma: keep
 #include "manager/throne_tracker.h"
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
+/* 4.19: defined in fs/notify/mark.c but only declared in fs/notify/fsnotify.h */
+extern void fsnotify_wait_marks_destroyed(void);
+#endif
+
 #define MASK_SYSTEM (FS_CREATE | FS_MOVE | FS_EVENT_ON_CHILD)
 
 struct watch_dir {

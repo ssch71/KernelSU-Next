@@ -1389,8 +1389,9 @@ static int selinux_hide_feature_set(u64 value)
     } else if (!enable) {
         WRITE_ONCE(ksu_selinux_hide_running, false);
     }
-    // Only report enabled when the stock state is really serving queries
-    WRITE_ONCE(ksu_selinux_hide_enabled, enable && !ret);
+    // Report what was asked, like 5.4+, so the manager saves it and the next
+    // boot, which still has the stock policy, can bring it up
+    WRITE_ONCE(ksu_selinux_hide_enabled, enable);
     pr_info("selinux_hide: ksu_selinux_hide_enabled: %d, ksu_selinux_hide_running: %d\n",
             ksu_selinux_hide_enabled, ksu_selinux_hide_running);
     mutex_unlock(&selinux_hide_mutex);

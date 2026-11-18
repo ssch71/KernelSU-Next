@@ -1289,23 +1289,164 @@ allow:
     goto out;
 }
 
-#else /* 4.19: SELinux policy-swap hiding is not supported */
+#else /* 4.19 */
+/*
+ * 4.19: every security_*() call takes the selinux_state it works on, so the
+ * stock policy does not need the *_with_policy() reimplementations above. The
+ * kernel keeps the first policy init loads (sel_write_load) and builds a
+ * second, read-only state from it on demand (security/selinux/ss/services.c);
+ * the selinuxfs and setprocattr hooks in the kernel answer app queries from
+ * fake_state once selinux_hide is running.
+ */
+#include <linux/types.h>
+#include <linux/mm.h>
+#include <linux/mutex.h>
+#include <linux/jump_label.h>
+#include <linux/string.h>
 #include "avc.h"
 #include "security.h"
-struct selinux_state fake_state = {0};
-#include <linux/types.h>
-#include <linux/jump_label.h>
-#include "feature/selinux_hide.h"
+#include "ss/services.h"
+#include "selinux_hide.h"
+#include "klog.h" // IWYU pragma: keep
+#include "ksu.h"
+#include "policy/feature.h"
 
-bool ksu_selinux_hide_running = false;
-bool ksu_selinux_hide_enabled = false;
+extern int ksu_selinux_build_stock_state(struct selinux_state *state);
+extern void ksu_selinux_drop_stock_policy(void);
+
+struct selinux_state fake_state = {0};
+bool ksu_selinux_hide_running __read_mostly = false;
+bool ksu_selinux_hide_enabled __read_mostly = false;
 struct page *fake_status = NULL;
 DEFINE_STATIC_KEY_FALSE(fake_status_initialize_key);
 
-void initialize_fake_status(void) {}
-void ksu_selinux_hide_init(void) {}
-void ksu_selinux_hide_exit(void) {}
-void ksu_selinux_hide_drop_backup_if_unused(void) {}
-void ksu_selinux_hide_handle_second_stage(void) {}
-void ksu_selinux_hide_handle_post_fs_data(void) {}
+static DEFINE_MUTEX(selinux_hide_mutex);
+
+void initialize_fake_status(void)
+{
+    struct selinux_kernel_status *status, *new_status;
+    struct page *new_page;
+
+    mutex_lock(&selinux_state.ss->status_lock);
+    if (fake_status)
+        goto out;
+    if (!selinux_state.ss->status_page) {
+        pr_warn("initialize_fake_status: status_page not exist\n");
+        goto out;
+    }
+
+    status = page_address(selinux_state.ss->status_page);
+    if (!status->enforcing && !ksu_late_loaded) {
+        pr_warn("initialize_fake_status: skip not enforcing\n");
+        goto out;
+    }
+
+    new_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+    if (!new_page) {
+        pr_err("initialize_fake_status: failed to allocate page\n");
+        goto out;
+    }
+
+    new_status = page_address(new_page);
+    memcpy(new_status, status, sizeof(*status));
+    if (ksu_late_loaded) {
+        // The loader may have reloaded sepolicy before us, serve what a
+        // stock 4.19 boot ends with: the creation sentinel.
+        new_status->sequence = 0;
+        new_status->policyload = 0;
+        new_status->enforcing = 1;
+    }
+
+    WRITE_ONCE(fake_status, new_page);
+    pr_info("initialize_fake_status initialized: sequence=%d, policyload=%d, enforcing=%d\n",
+            new_status->sequence, new_status->policyload, new_status->enforcing);
+out:
+    mutex_unlock(&selinux_state.ss->status_lock);
+}
+
+static int selinux_hide_feature_get(u64 *value)
+{
+    *value = ksu_selinux_hide_enabled ? 1 : 0;
+    return 0;
+}
+
+static int selinux_hide_feature_set(u64 value)
+{
+    bool enable = value != 0;
+    int ret = 0;
+
+    pr_info("selinux_hide: set to %d\n", enable);
+    mutex_lock(&selinux_hide_mutex);
+    if (enable && !ksu_selinux_hide_running) {
+        ret = ksu_selinux_build_stock_state(&fake_state);
+        if (ret == -ENOENT) {
+            pr_err("selinux_hide: no stock sepolicy kept, please save feature and reboot to retry!\n");
+            ret = -EAGAIN;
+        }
+        // Pairs with smp_load_acquire() in the kernel's selinuxfs/setprocattr hooks
+        if (!ret)
+            smp_store_release(&ksu_selinux_hide_running, true);
+    } else if (!enable) {
+        WRITE_ONCE(ksu_selinux_hide_running, false);
+    }
+    // Only report enabled when the stock state is really serving queries
+    WRITE_ONCE(ksu_selinux_hide_enabled, enable && !ret);
+    pr_info("selinux_hide: ksu_selinux_hide_enabled: %d, ksu_selinux_hide_running: %d\n",
+            ksu_selinux_hide_enabled, ksu_selinux_hide_running);
+    mutex_unlock(&selinux_hide_mutex);
+    return ret;
+}
+
+static const struct ksu_feature_handler selinux_hide_handler = {
+    .feature_id = KSU_FEATURE_SELINUX_HIDE,
+    .name = "selinux_hide",
+    .get_handler = selinux_hide_feature_get,
+    .set_handler = selinux_hide_feature_set,
+};
+
+void ksu_selinux_hide_handle_second_stage(void)
+{
+    // Before apply_kernelsu_rules() bumps the policyload counter
+    initialize_fake_status();
+    if (fake_status)
+        static_branch_disable(&fake_status_initialize_key);
+    else
+        pr_warn("selinux_hide: fake status need late initialization\n");
+}
+
+void ksu_selinux_hide_handle_post_fs_data(void)
+{
+    static_branch_disable(&fake_status_initialize_key);
+    if (!fake_status)
+        pr_err("selinux_hide: fake status is not initialized after post-fs-data!\n");
+}
+
+void __init ksu_selinux_hide_init(void)
+{
+    if (ksu_register_feature_handler(&selinux_hide_handler))
+        pr_err("Failed to register selinux_hide feature handler\n");
+    if (ksu_late_loaded)
+        initialize_fake_status();
+    else
+        static_branch_enable(&fake_status_initialize_key);
+}
+
+void __exit ksu_selinux_hide_exit(void)
+{
+    mutex_lock(&selinux_hide_mutex);
+    WRITE_ONCE(ksu_selinux_hide_running, false);
+    WRITE_ONCE(ksu_selinux_hide_enabled, false);
+    mutex_unlock(&selinux_hide_mutex);
+    ksu_unregister_feature_handler(KSU_FEATURE_SELINUX_HIDE);
+}
+
+void ksu_selinux_hide_drop_backup_if_unused(void)
+{
+    mutex_lock(&selinux_hide_mutex);
+    if (!ksu_selinux_hide_running) {
+        pr_info("selinux_hide is not enabled - drop the stock sepolicy\n");
+        ksu_selinux_drop_stock_policy();
+    }
+    mutex_unlock(&selinux_hide_mutex);
+}
 #endif

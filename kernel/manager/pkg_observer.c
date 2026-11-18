@@ -11,6 +11,11 @@
 #include "klog.h" // IWYU pragma: keep
 #include "manager/throne_tracker.h"
 
+#if defined(CONFIG_KSU_SUSFS) && defined(CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER)
+// The uid of a reinstalled app changes, resolve the filtered package names again
+extern void susfs_parse_priority_app_strings(void);
+#endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
 /* 4.19: defined in fs/notify/mark.c but only declared in fs/notify/fsnotify.h */
 extern void fsnotify_wait_marks_destroyed(void);
@@ -76,6 +81,9 @@ static int ksu_handle_inode_event(struct fsnotify_mark *mark, u32 mask,
         track_throne(false);
 #else
         ksu_defer_track_throne();
+#endif
+#if defined(CONFIG_KSU_SUSFS) && defined(CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER)
+        susfs_parse_priority_app_strings();
 #endif
     }
     return 0;
